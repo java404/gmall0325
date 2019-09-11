@@ -7,4 +7,8 @@ public class ManageConst {
     public static final String SKUKEY_SUFFIX = ":info";
 
     public static final int SKUKEY_TIMEOUT = 24*60*60;
+
+    public static final int SKULOCK_EXPIRE_PY = 1000;
+
+    public static final String SKULOCK_SUFFIX = ":lock";
 }

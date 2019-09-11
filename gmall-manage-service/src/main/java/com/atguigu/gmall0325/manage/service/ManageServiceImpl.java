@@ -1,14 +1,21 @@
 package com.atguigu.gmall0325.manage.service;
 
 import com.alibaba.dubbo.config.annotation.Service;
+import com.alibaba.fastjson.JSON;
 import com.atguigu.gmall0325.config.RedisUtil;
 import com.atguigu.gmall0325.entity.*;
+import com.atguigu.gmall0325.manage.constant.ManageConst;
 import com.atguigu.gmall0325.manage.mapper.*;
 import com.atguigu.gmall0325.service.ManageService;
+import org.redisson.Redisson;
+import org.redisson.api.RLock;
+import org.redisson.api.RedissonClient;
+import org.redisson.config.Config;
 import org.springframework.beans.factory.annotation.Autowired;
 import redis.clients.jedis.Jedis;
 
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 
 @Service
 public class ManageServiceImpl implements ManageService {
@@ -57,15 +64,16 @@ public class ManageServiceImpl implements ManageService {
 
     @Autowired
     private RedisUtil redisUtil;
+
     @Override
     public List<BaseCatalog1> getCatalog1() {
 
-        try {
+/*        try {
             Jedis jedis = redisUtil.getJedis();
             jedis.set("k1","v1");
         } catch (Exception e) {
             e.printStackTrace();
-        }
+        }*/
 
         return baseCatalog1Mapper.selectAll();
     }
@@ -235,13 +243,109 @@ public class ManageServiceImpl implements ManageService {
 
     @Override
     public SkuInfo getSkuInfoById(String skuId) {
-        SkuInfo skuInfo = skuInfoMapper.selectByPrimaryKey(skuId);
 
+        SkuInfo skuInfo = null;
+        Jedis jedis = null;
+        RLock lock = null;
+        String skuKey = ManageConst.SKUKEY_PREFIX + skuId + ManageConst.SKUKEY_SUFFIX;
+        try {
+            jedis = redisUtil.getJedis();
+
+            String skuInfoJson = jedis.get(skuKey);
+            //如果缓存中有直接从缓存命中否则走数据库
+            if(skuInfoJson!=null){
+                skuInfo = JSON.parseObject(skuInfoJson, SkuInfo.class);
+                System.out.println("走缓存");
+                return skuInfo;
+            }else{
+                System.out.println("在缓存中没有命中");
+                //加锁
+                Config config = new Config();
+                config.useSingleServer().setAddress("redis://192.168.157.120:6379");
+
+                //创建redisson instance
+                RedissonClient redisson = Redisson.create(config);
+
+                //获取锁
+                lock = redisson.getLock("myLock");
+                lock.lock(10, TimeUnit.SECONDS);
+
+                skuInfo = getSkuInfoDB(skuId);
+                skuInfoJson = JSON.toJSONString(skuInfo);
+                System.out.println("redis活着呢");
+                //把skuInfo存到redis缓存中
+                jedis.setex(skuKey,ManageConst.SKUKEY_TIMEOUT, skuInfoJson);
+
+                return skuInfo;
+
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        } finally {
+            if(jedis!=null){
+                jedis.close();
+            }
+            if(lock!=null){
+                lock.unlock();
+            }
+
+        }
+        return getSkuInfoDB(skuId);
+        //return getSkuInfoLock(skuId);
+    }
+
+    private SkuInfo getSkuInfoLock(String skuId) {
+        SkuInfo skuInfo = null;
+        Jedis jedis = null;
+        String skuKey = ManageConst.SKUKEY_PREFIX + skuId + ManageConst.SKUKEY_SUFFIX;
+        try {
+            jedis = redisUtil.getJedis();
+
+            String skuInfoJson = jedis.get(skuKey);
+            //如果缓存中有直接从缓存命中否则走数据库
+            if(skuInfoJson!=null){
+                skuInfo = JSON.parseObject(skuInfoJson, SkuInfo.class);
+                System.out.println("走缓存");
+                return skuInfo;
+            }else{
+                System.out.println("在缓存中没有命中");
+                //定义锁key
+                String skuLockKey = ManageConst.SKUKEY_PREFIX + skuId + ManageConst.SKULOCK_SUFFIX;
+                //生成锁
+                String lockKey = jedis.set(skuLockKey, "OK", "NX", "PX", ManageConst.SKULOCK_EXPIRE_PY);
+                if ("OK".equals(lockKey)){
+                    skuInfo = getSkuInfoDB(skuId);
+                    skuInfoJson = JSON.toJSONString(skuInfo);
+                    System.out.println("redis活着呢");
+                    //把skuInfo存到redis缓存中
+                    jedis.setex(skuKey,ManageConst.SKUKEY_TIMEOUT, skuInfoJson);
+                }else{
+                    System.out.println("等待");
+                    Thread.sleep(1000);
+                    return getSkuInfoById(skuKey);
+                }
+
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        } finally {
+            if(jedis!=null){
+                jedis.close();
+            }
+
+        }
+        return getSkuInfoDB(skuId);
+    }
+
+    private SkuInfo getSkuInfoDB(String skuId) {
+
+        SkuInfo skuInfo = skuInfoMapper.selectByPrimaryKey(skuId);
         SkuImage skuImage = new SkuImage();
         skuImage.setSkuId(skuId);
         List<SkuImage> skuImages = skuImageMapper.select(skuImage);
         skuInfo.setSkuImageList(skuImages);
 
+        System.out.println("走数据库");
         return skuInfo;
     }
 
